@@ -2,6 +2,7 @@
 //
 //  tjtag.c - EJTAG Debrick Utility v3.0.1 - Tornado MOD
 //
+// vim: ts=4:sw=4:et
 
 // Default is Compile for Linux (both #define's below should be commented out)
 //#define __FreeBSD__       // uncomment only this for FreeBSD
@@ -35,6 +36,13 @@
 
 #include "tjtag.h"
 #include "spi.h"
+
+#ifdef BUSPIRATE
+#include "buspirate.h"
+#include "serial.h"
+#define BP_PORT "/dev/ttyACM0"
+#define BP_BAUDRATE B115200
+#endif /* BUSPIRATE */
 
 #define TRUE  1
 #define FALSE 0
@@ -417,6 +425,28 @@ flash_chip_type  flash_chip_list[] =
 
 void lpt_openport(void)
 {
+#ifdef BUSPIRATE
+    char byte;
+    char buf[64];
+
+    pfd = serial_open( BP_PORT );
+    serial_setup( pfd, BP_BAUDRATE );
+    if ( BP_EnableBinary( pfd ) != BBIO ) {
+        fprintf( stderr, "Couldn't start binary mode\n" );
+        exit(-1);
+    }
+
+    /* set all but MISO as output */
+    byte = (0x40) | (1 << BP_MISO);
+    serial_write( pfd, &byte, 1 );
+    if ( serial_read( pfd, buf, 1 ) != 1) {
+        fprintf( stderr, "Didn't get response for pin directions settings\n" );
+        exit(-1);
+    }
+    //tcflush( pfd, TCIFLUSH );
+    serial_read(pfd, buf, 5);
+
+#else /* not BUSPIRATE */
 #ifdef __WIN32__    // ---- Compiler Specific Code ----
 
     HANDLE h;
@@ -447,23 +477,31 @@ void lpt_openport(void)
 
     if (pfd < 0)
     {
-        perror("Failed to open %s", parport_path);
+        fprintf( stderr, "Failed to open %s", parport_path);
         exit(0);
     }
     if ((ioctl(pfd, PPEXCL) < 0) || (ioctl(pfd, PPCLAIM) < 0))
     {
-        perror("Failed to lock %s", parport_path);
+        fprintf( stderr, "Failed to lock %s", parport_path);
         close(pfd);
         exit(0);
     }
 
 #endif
+#endif /* BUSPIRATE */
 
 }
 
 
 void lpt_closeport(void)
 {
+#ifdef BUSPIRATE
+    char byte;
+    /* reset buspirate */
+    byte = 0x0F;
+    serial_write( pfd, &byte, 1 );
+    serial_close( pfd );
+#else
 #ifndef __WIN32__   // ---- Compiler Specific Code ----
 
 #ifndef __FreeBSD__    // ---- Compiler Specific Code ----
@@ -480,6 +518,7 @@ void lpt_closeport(void)
     close(pfd);
 
 #endif
+#endif /* BUSPIRATE */
 }
 
 // Yoon's extensions for exiting debug mode
@@ -496,6 +535,27 @@ static unsigned char clockin(int tms, int tdi)
 
     tms = tms ? 1 : 0;
     tdi = tdi ? 1 : 0;
+
+#ifdef BUSPIRATE
+    data = (1 << BP_MISO) | (0 << BP_CLK) | (tms << BP_CS) | (tdi << BP_MOSI);
+    data |= 0x80;
+    cable_wait();
+    serial_write( pfd, (char *)&data, 1 );
+    if (serial_read( pfd, (char *)&data, 1 ) != 1) {
+        fprintf( stderr, "Buspirate didn't respond in time. Too bad...\n" );
+        exit(-1);
+    }
+    data = (1 << BP_MISO) | (1 << BP_CLK) | (tms << BP_CS) | (tdi << BP_MOSI);
+    data |= 0x80;
+    cable_wait();
+    serial_write( pfd, (char *)&data, 1 );
+    if (serial_read( pfd, (char *)&data, 1 ) != 1) {
+        fprintf( stderr, "Buspirate didn't respond in time. Too bad...\n" );
+        exit(-1);
+    }
+    data >>= BP_MISO;
+    data &= 0x01;
+#else
 // yoon's remark we set wtrst_n to be d4 so we are going to drive it low
     if (wiggler) data = (1 << WTDO) | (0 << WTCK) | (tms << WTMS) | (tdi << WTDI)| (1 << WTRST_N);
     else        data = (1 << TDO) | (0 << TCK) | (tms << TMS) | (tdi << TDI);
@@ -528,6 +588,7 @@ static unsigned char clockin(int tms, int tdi)
     data ^= 0x80;
     data >>= wiggler?WTDO:TDO;
     data &= 1;
+#endif /* BUSPIRATE */
 
     return data;
 }
