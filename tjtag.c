@@ -41,7 +41,11 @@
 #include "buspirate.h"
 #include "serial.h"
 #define BP_PORT "/dev/ttyACM0"
-#define BP_BAUDRATE B115200
+#define BUF_LEN 1024
+unsigned char tdibuf[BUF_LEN];
+unsigned char tmsbuf[BUF_LEN];
+unsigned char tdobuf[BUF_LEN];
+int bitcount=0,byteptr=0;
 #endif /* BUSPIRATE */
 
 #define TRUE  1
@@ -426,26 +430,25 @@ flash_chip_type  flash_chip_list[] =
 void lpt_openport(void)
 {
 #ifdef BUSPIRATE
-    char byte;
-    char buf[64];
-
-    pfd = serial_open( BP_PORT );
-    serial_setup( pfd, BP_BAUDRATE );
+    pfd = openPort(BP_PORT,0);
+    configurePort(pfd, 1000000);
     if ( BP_EnableBinary( pfd ) != BBIO ) {
         fprintf( stderr, "Couldn't start binary mode\n" );
         exit(-1);
     }
 
-    /* set all but MISO as output */
-    byte = (0x40) | (1 << BP_MISO);
-    serial_write( pfd, &byte, 1 );
-    if ( serial_read( pfd, buf, 1 ) != 1) {
-        fprintf( stderr, "Didn't get response for pin directions settings\n" );
+    if (BP_EnableOCD(pfd) != OOCD) {
+        printf("Couldn't start OOCD mode\n");
         exit(-1);
     }
-    //tcflush( pfd, TCIFLUSH );
-    serial_read(pfd, buf, 5);
+    BP_OCDMode(pfd, OOCD_MODE_JTAG);
 
+    // not needed, just for fun
+    BP_OCDFeature(pfd, OOCD_FEATURE_LED, 1);
+    usleep(1000000);
+    BP_OCDFeature(pfd, OOCD_FEATURE_LED, 0);
+    usleep(1000000);
+    BP_OCDFeature(pfd, OOCD_FEATURE_LED, 1);	
 #else /* not BUSPIRATE */
 #ifdef __WIN32__    // ---- Compiler Specific Code ----
 
@@ -496,11 +499,9 @@ void lpt_openport(void)
 void lpt_closeport(void)
 {
 #ifdef BUSPIRATE
-    char byte;
-    /* reset buspirate */
-    byte = 0x0F;
-    serial_write( pfd, &byte, 1 );
-    serial_close( pfd );
+
+    BP_DisableBinary(pfd);
+    closePort(pfd);
 #else
 #ifndef __WIN32__   // ---- Compiler Specific Code ----
 
@@ -528,7 +529,7 @@ static void return_from_debug_mode(void)
     ExecuteDebugModule(pracc_return_from_debug);
 }
 
-
+#ifndef BUSPIRATE
 static unsigned char clockin(int tms, int tdi)
 {
     unsigned char data;
@@ -536,26 +537,6 @@ static unsigned char clockin(int tms, int tdi)
     tms = tms ? 1 : 0;
     tdi = tdi ? 1 : 0;
 
-#ifdef BUSPIRATE
-    data = (1 << BP_MISO) | (0 << BP_CLK) | (tms << BP_CS) | (tdi << BP_MOSI);
-    data |= 0x80;
-    cable_wait();
-    serial_write( pfd, (char *)&data, 1 );
-    if (serial_read( pfd, (char *)&data, 1 ) != 1) {
-        fprintf( stderr, "Buspirate didn't respond in time. Too bad...\n" );
-        exit(-1);
-    }
-    data = (1 << BP_MISO) | (1 << BP_CLK) | (tms << BP_CS) | (tdi << BP_MOSI);
-    data |= 0x80;
-    cable_wait();
-    serial_write( pfd, (char *)&data, 1 );
-    if (serial_read( pfd, (char *)&data, 1 ) != 1) {
-        fprintf( stderr, "Buspirate didn't respond in time. Too bad...\n" );
-        exit(-1);
-    }
-    data >>= BP_MISO;
-    data &= 0x01;
-#else
 // yoon's remark we set wtrst_n to be d4 so we are going to drive it low
     if (wiggler) data = (1 << WTDO) | (0 << WTCK) | (tms << WTMS) | (tdi << WTDI)| (1 << WTRST_N);
     else        data = (1 << TDO) | (0 << TCK) | (tms << TMS) | (tdi << TDI);
@@ -588,23 +569,56 @@ static unsigned char clockin(int tms, int tdi)
     data ^= 0x80;
     data >>= wiggler?WTDO:TDO;
     data &= 1;
-#endif /* BUSPIRATE */
 
     return data;
 }
+#endif
 
-// ---------------------------------------
-// ---- End of Compiler Specific Code ----
-// ---------------------------------------
+#ifdef BUSPIRATE
+void BPclockin(int tms, int tdi)
+{
+    uint8_t bit;
+
+    bit = (1 << (bitcount % 8));
+    if (tms)
+        tmsbuf[byteptr] |= bit;
+    else
+        tmsbuf[byteptr] &= ~bit;
+
+    if (tdi)
+        tdibuf[byteptr] |= bit;
+    else
+        tdibuf[byteptr] &= ~bit;
+
+    bitcount++;
+    byteptr = bitcount / 8;
+}
+
+void BPexecute()
+{
+    BP_OCDTapShift(pfd, tdobuf, tdibuf, tmsbuf, bitcount);
+    bitcount=0,byteptr=0;
+}
+#endif /* BUSPIRATE */
 
 void test_reset(void)
 {
+#ifdef BUSPIRATE
+    BPclockin(1, 0);
+    BPclockin(1, 0);
+    BPclockin(1, 0);
+    BPclockin(1, 0);
+    BPclockin(1, 0);
+    BPclockin(0, 0);
+    BPexecute();
+#else
     clockin(1, 0);  // Run through a handful of clock cycles with TMS high to make sure
     clockin(1, 0);  // we are in the TEST-LOGIC-RESET state.
     clockin(1, 0);
     clockin(1, 0);
     clockin(1, 0);
     clockin(0, 0);  // enter runtest-idle
+#endif
 }
 
 static int curinstr = 0xFFFFFFFF;
@@ -614,7 +628,19 @@ void set_instr(int instr)
 
     if (instr == curinstr)
         return;
-
+#ifdef BUSPIRATE
+    BPclockin(1, 0);  // enter select-dr-scan
+    BPclockin(1, 0);  // enter select-ir-scan
+    BPclockin(0, 0);  // enter capture-ir
+    BPclockin(0, 0);  // enter shift-ir (dummy)
+    for (i=0; i < instruction_length; i++)
+    {
+        BPclockin(i==(instruction_length - 1), (instr>>i)&1);
+    }
+    BPclockin(1, 0);  // enter update-ir
+    BPclockin(0, 0);  // enter runtest-idle
+    BPexecute();
+#else
     clockin(1, 0);  // enter select-dr-scan
     clockin(1, 0);  // enter select-ir-scan
     clockin(0, 0);  // enter capture-ir
@@ -625,6 +651,7 @@ void set_instr(int instr)
     }
     clockin(1, 0);  // enter update-ir
     clockin(0, 0);  // enter runtest-idle
+#endif /* BUSPIRATE */
 
     curinstr = instr;
 }
@@ -639,6 +666,31 @@ static unsigned int ReadWriteData(unsigned int in_data)
     if (DEBUG) printf("INSTR: 0x%04x  ", curinstr);
     if (DEBUG) printf("W: 0x%08x ", in_data);
 
+#ifdef BUSPIRATE
+
+    char buftmp[4] ;
+    BPclockin(1, 0);  // enter select-dr-scan
+    BPclockin(0, 0);  // enter capture-dr
+    BPclockin(0, 0);  // enter shift-dr
+    for (i = 0 ; i < 32 ; i++)
+    {
+        BPclockin((i == 31), ((in_data >> i) & 1));
+    }
+    BPclockin(1,0);   // enter update-dr
+    BPclockin(0,0);   // enter runtest-idle
+    BPexecute();
+	
+    // Meaningful output data is shifted by 3 bits; we need some tinkering
+    // to get it. It can be done nicer, but this works :)
+    out_data |= tdobuf[0] >> 3;
+    out_data |= tdobuf[1] << 5;
+    out_data |= (tdobuf[1] >> 3) << 8;
+    out_data |= (tdobuf[2] << 5) << 8;
+    out_data |= (tdobuf[2] >> 3) << 16;
+    out_data |= (tdobuf[3] << 5) << 16;
+    out_data |= tdobuf[4] << 29;
+
+#else
     clockin(1, 0);  // enter select-dr-scan
     clockin(0, 0);  // enter capture-dr
     clockin(0, 0);  // enter shift-dr
@@ -649,6 +701,7 @@ static unsigned int ReadWriteData(unsigned int in_data)
     }
     clockin(1,0);   // enter update-dr
     clockin(0,0);   // enter runtest-idle
+#endif
 
     if (DEBUG) printf("R: 0x%08x\n", out_data);
 

@@ -20,8 +20,8 @@
  * http://the-bus-pirate.googlecode.com/svn/trunk/bootloader-v4/pirate-loader/source/pirate-loader.c
  *
  */
-#ifndef MYSERIAL_h_
-#define MYSERIAL_h_
+#ifndef MYSERIAL_H_
+#define MYSERIAL_H_
 
 #include <stdint.h>
 #include <unistd.h>
@@ -30,12 +30,11 @@
 #include <sys/types.h>
 #include <sys/time.h>
 
-int serial_setup(int fd, speed_t speed);
-int serial_write(int fd, char *buf, int size);
-int serial_read(int fd, char *buf, int size);
-int serial_open(char *port);
-int serial_close(int fd);
+int serial_write(int fd, const unsigned char *buf, int size);
+int readWithTimeout(int fd, unsigned char *out, int length, int timeout);
+int configurePort(int fd, unsigned long baudrate);
+int openPort(const char* dev, unsigned long flags);
+int closePort(int fd);
 
-
-#endif /* MYSERIAL_h_ */
+#endif /* MYSERIAL_H_ */
 
