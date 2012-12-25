@@ -40,7 +40,7 @@
 #ifdef BUSPIRATE
 #include "buspirate.h"
 #include "serial.h"
-#define BP_PORT "/dev/ttyACM0"
+#define BP_PORT "/dev/ttyUSB0" //CHANGE if needed
 #define BUF_LEN 1024
 unsigned char tdibuf[BUF_LEN];
 unsigned char tmsbuf[BUF_LEN];
